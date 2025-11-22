@@ -58,15 +58,15 @@ class DetectionStream:
         if self.video_source:
             source = f'filesrc location="{self.video_source}" ! decodebin !'
         else:
-            source = 'libcamerasrc ! video/x-raw,format=RGB,width=1536,height=864 !'
+            source = 'libcamerasrc ! video/x-raw,format=RGB,width=640,height=480 !'
 
         pipeline_str = f"""
             {source}
             queue leaky=no max-size-buffers=3 !
-            videoscale n-threads=2 ! videoconvert n-threads=3 !
+            videoflip video-direction=180 !
+            videobox autocrop=true !
+            videoscale n-threads=2 !
             video/x-raw,format=RGB,width=640,height=640 !
-            queue leaky=no max-size-buffers=3 !
-            videoscale n-threads=2 ! videoconvert n-threads=2 !
             queue leaky=no max-size-buffers=3 !
             hailonet hef-path=/usr/share/hailo-models/yolov8s_h8l.hef batch-size=1 force-writable=true !
             queue leaky=no max-size-buffers=3 !
@@ -108,7 +108,6 @@ class DetectionStream:
 
     def _on_message(self, bus, msg):
         if msg.type == Gst.MessageType.EOS:
-            # Loop video by seeking to start
             self.pipeline.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, 0)
         elif msg.type == Gst.MessageType.ERROR:
             err, _ = msg.parse_error()

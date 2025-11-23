@@ -1,6 +1,7 @@
 import argparse
 import threading
 import time
+import os
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
@@ -117,14 +118,15 @@ class DetectionStream:
 
     def run(self):
         if self.video_source:
-            source = f'filesrc location="{self.video_source}" ! decodebin !'
+            abs_path = os.path.abspath(self.video_source)
+            source = f'filesrc location="{abs_path}" ! qtdemux ! h264parse ! avdec_h264 ! videoconvert !'
         else:
             source = 'libcamerasrc ! video/x-raw,format=RGB,width=640,height=480 !'
 
         pipeline_str = f"""
             {source}
             queue leaky=no max-size-buffers=3 !
-            videoflip video-direction=180 !
+            videoflip video-direction=0 !
             videobox autocrop=true !
             videoscale n-threads=2 !
             video/x-raw,format=RGB,width=640,height=640 !

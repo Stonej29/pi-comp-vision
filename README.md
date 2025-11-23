@@ -44,19 +44,19 @@ pip install -r requirements.txt
 
 ```bash
 # Run with camera
-python detection_web.py
+python main.py
 
 # Run with video file
-python detection_web.py -i video.mp4
+python main.py -i video.mp4
 
 # Virtual frame mode (shows tracking region without zooming)
-python detection_web.py --frame-mode
+python main.py --frame-mode
 
 # Hide detection boxes
-python detection_web.py --no-boxes
+python main.py --no-boxes
 
 # Custom settings
-python detection_web.py -p 8000 -s 0.05 -c 0.6
+python main.py -p 8000 -s 0.05 -c 0.6
 ```
 
 Access the stream at `http://<pi-ip>:8080`

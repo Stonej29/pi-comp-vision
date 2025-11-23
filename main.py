@@ -8,14 +8,15 @@ import argparse
 import threading
 import time
 import os
-import sys
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 import hailo
-from flask import Flask, Response
+from flask import Response
 import numpy as np
 import cv2
+
+from scripts import TrackingState, build_pipeline, create_app, generate_frames
 
 Gst.init(None)
 
@@ -32,17 +33,19 @@ class DetectionStream:
         self.frame_lock = threading.Lock()
         self.pipeline = None
         self.loop = None
-        self.app = Flask(__name__)
-        self._setup_routes()
 
-        # Zoom tracking state
-        self.current_crop = [0.0, 0.0, 1.0, 1.0]
-        self.target_crop = [0.0, 0.0, 1.0, 1.0]
-        self.smooth_factor = smooth_factor
-        self.frames_without_person = 0
-        self.zoom_out_delay = zoom_out_delay
+        # Flask setup
+        self.app = create_app()
+        self._setup_stream_route()
+
+        # Tracking state
+        self.tracking = TrackingState(
+            smooth_factor=smooth_factor,
+            zoom_out_delay=zoom_out_delay,
+            confidence_threshold=confidence_threshold,
+            padding=padding
+        )
         self.confidence_threshold = confidence_threshold
-        self.padding = padding
         self.show_boxes = show_boxes
         self.zoom_mode = zoom_mode
         self.show_fps = show_fps
@@ -50,21 +53,13 @@ class DetectionStream:
         self.frame_count = 0
         self.last_fps_time = time.time()
 
-    def _setup_routes(self):
-        @self.app.route('/')
-        def index():
-            return '<html><body style="margin:0;background:#000;display:flex;justify-content:center;align-items:center;min-height:100vh;"><img src="/stream" style="max-width:100%;"></body></html>'
-
+    def _setup_stream_route(self):
         @self.app.route('/stream')
         def stream():
-            return Response(self._generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-    def _generate(self):
-        while True:
-            with self.frame_lock:
-                if self.latest_frame:
-                    yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + self.latest_frame + b'\r\n'
-            time.sleep(0.033)
+            return Response(
+                generate_frames(self.frame_lock, lambda: self.latest_frame),
+                mimetype='multipart/x-mixed-replace; boundary=frame'
+            )
 
     def _on_sample(self, sink):
         sample = sink.emit('pull-sample')
@@ -81,8 +76,7 @@ class DetectionStream:
                     self.last_fps_time = current_time
 
                 # Smooth interpolation toward target
-                for i in range(4):
-                    self.current_crop[i] += (self.target_crop[i] - self.current_crop[i]) * self.smooth_factor
+                self.tracking.interpolate()
 
                 # Decode JPEG and apply crop
                 frame = np.frombuffer(info.data, dtype=np.uint8)
@@ -90,10 +84,7 @@ class DetectionStream:
 
                 if frame is not None:
                     h, w = frame.shape[:2]
-                    x = int(self.current_crop[0] * w)
-                    y = int(self.current_crop[1] * h)
-                    cw = int(self.current_crop[2] * w)
-                    ch = int(self.current_crop[3] * h)
+                    x, y, cw, ch = self.tracking.get_crop_pixels(w, h)
 
                     if self.zoom_mode:
                         # Crop and resize back to original size
@@ -135,73 +126,12 @@ class DetectionStream:
                         roi.remove_object(det)
 
             # Update target crop based on all detected persons
-            if persons:
-                self.frames_without_person = 0
-
-                # Calculate bounding box that contains all persons
-                min_x = min(det.get_bbox().xmin() for det in persons)
-                min_y = min(det.get_bbox().ymin() for det in persons)
-                max_x = max(det.get_bbox().xmin() + det.get_bbox().width() for det in persons)
-                max_y = max(det.get_bbox().ymin() + det.get_bbox().height() for det in persons)
-
-                # Calculate center and size
-                cx = (min_x + max_x) / 2
-                cy = (min_y + max_y) / 2
-                width = max_x - min_x
-                height = max_y - min_y
-
-                # Make crop square using the larger dimension
-                size = max(width, height) * (1 + 2 * self.padding)
-                # Clamp to frame bounds
-                x = max(0.0, min(cx - size / 2, 1.0 - size))
-                y = max(0.0, min(cy - size / 2, 1.0 - size))
-                size = min(size, 1.0)
-                self.target_crop = [x, y, size, size]
-            else:
-                # Delay before zooming out
-                self.frames_without_person += 1
-                if self.frames_without_person > self.zoom_out_delay:
-                    self.target_crop = [0.0, 0.0, 1.0, 1.0]
+            self.tracking.update_target(persons)
 
         return Gst.PadProbeReturn.OK
 
     def run(self):
-        # Validate video source if provided
-        if self.video_source:
-            abs_path = os.path.abspath(self.video_source)
-            if not os.path.exists(abs_path):
-                print(f"Error: Video file not found: {abs_path}")
-                sys.exit(1)
-            source = f'filesrc location="{abs_path}" ! qtdemux ! h264parse ! avdec_h264 ! videoconvert !'
-            sync = 'true'
-        else:
-            source = 'libcamerasrc ! video/x-raw,format=RGB,width=640,height=480 !'
-            sync = 'false'
-
-        pipeline_str = f"""
-            {source}
-            queue leaky=no max-size-buffers=3 !
-            videoscale n-threads=2 add-borders=true !
-            video/x-raw,format=RGB,width=640,height=640 !
-            queue leaky=no max-size-buffers=3 !
-            hailonet hef-path=/usr/share/hailo-models/yolov8s_h8l.hef batch-size=1 force-writable=true !
-            queue leaky=no max-size-buffers=3 !
-            hailofilter so-path=/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so qos=false !
-            identity name=cb !
-            queue leaky=no max-size-buffers=3 !
-            hailooverlay !
-            videoscale n-threads=2 !
-            video/x-raw,width=1280,height=720 !
-            videoconvert n-threads=2 !
-            jpegenc quality=80 !
-            appsink name=sink emit-signals=true sync={sync} drop=true max-buffers=1
-        """
-
-        try:
-            self.pipeline = Gst.parse_launch(pipeline_str)
-        except GLib.Error as e:
-            print(f"Error: Failed to create pipeline: {e}")
-            sys.exit(1)
+        self.pipeline = build_pipeline(self.video_source)
 
         # Detection callback
         cb = self.pipeline.get_by_name("cb")
@@ -224,7 +154,7 @@ class DetectionStream:
         self.loop = GLib.MainLoop()
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
-        bus.connect("message", self._on_message)
+        bus.connect("message", lambda bus, msg: self._on_message(bus, msg))
 
         try:
             self.loop.run()

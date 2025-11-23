@@ -25,6 +25,19 @@ Real-time person detection and auto-tracking camera system for Raspberry Pi 5 wi
 
 ```bash
 sudo apt install python3-gi python3-gi-cairo gir1.2-gst-1.0 python3-flask python3-opencv python3-numpy
+pip install -r requirements.txt
+```
+
+## Project Structure
+
+```
+├── main.py                   # Main entry point
+├── scripts/
+│   ├── tracking.py           # Zoom tracking state and calculations
+│   ├── pipeline.py           # GStreamer pipeline setup
+│   └── streaming.py          # Flask web streaming
+├── requirements.txt
+└── README.md
 ```
 
 ## Usage

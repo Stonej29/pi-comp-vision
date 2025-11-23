@@ -6,6 +6,8 @@ gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 import hailo
 from flask import Flask, Response
+import numpy as np
+import cv2
 
 Gst.init(None)
 
@@ -19,6 +21,10 @@ class DetectionStream:
         self.loop = None
         self.app = Flask(__name__)
         self._setup_routes()
+
+        self.current_crop = [0.0, 0.0, 1.0, 1.0]
+        self.target_crop = [0.0, 0.0, 1.0, 1.0]
+        self.smooth_factor = 0.1
 
     def _setup_routes(self):
         @self.app.route('/')
@@ -42,16 +48,66 @@ class DetectionStream:
             buf = sample.get_buffer()
             ok, info = buf.map(Gst.MapFlags.READ)
             if ok:
-                with self.frame_lock:
-                    self.latest_frame = bytes(info.data)
+                # Smooth interpolation toward target
+                for i in range(4):
+                    self.current_crop[i] += (self.target_crop[i] - self.current_crop[i]) * self.smooth_factor
+
+                # Decode JPEG and apply crop
+                frame = np.frombuffer(info.data, dtype=np.uint8)
+                frame = cv2.imdecode(frame, cv2.IMREAD_COLOR)
+
+                if frame is not None:
+                    h, w = frame.shape[:2]
+                    x = int(self.current_crop[0] * w)
+                    y = int(self.current_crop[1] * h)
+                    cw = int(self.current_crop[2] * w)
+                    ch = int(self.current_crop[3] * h)
+
+                    # Crop and resize back to original size
+                    cropped = frame[y:y+ch, x:x+cw]
+                    if cropped.size > 0:
+                        zoomed = cv2.resize(cropped, (w, h))
+                        _, jpeg = cv2.imencode('.jpg', zoomed, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                        with self.frame_lock:
+                            self.latest_frame = jpeg.tobytes()
+
                 buf.unmap(info)
         return Gst.FlowReturn.OK
 
     def _on_buffer(self, pad, info):
         buf = info.get_buffer()
         if buf:
-            for det in hailo.get_roi_from_buffer(buf).get_objects_typed(hailo.HAILO_DETECTION):
-                print(f"{det.get_label()}: {det.get_confidence():.2f}")
+            roi = hailo.get_roi_from_buffer(buf)
+            detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+            best_person = None
+            best_confidence = 0.0
+
+            for det in detections:
+                if det.get_label() != "person" or det.get_confidence() < 0.5:
+                    roi.remove_object(det)
+                else:
+                    if det.get_confidence() > best_confidence:
+                        best_confidence = det.get_confidence()
+                        best_person = det
+
+            # Update target crop based on best detection
+            if best_person:
+                bbox = best_person.get_bbox()
+                # Add padding around the person (30%)
+                padding = 0.3
+                cx = bbox.xmin() + bbox.width() / 2
+                cy = bbox.ymin() + bbox.height() / 2
+                # Make crop square using the larger dimension
+                size = max(bbox.width(), bbox.height()) * (1 + 2 * padding)
+                # Clamp to frame bounds
+                x = max(0.0, min(cx - size / 2, 1.0 - size))
+                y = max(0.0, min(cy - size / 2, 1.0 - size))
+                size = min(size, 1.0)
+                self.target_crop = [x, y, size, size]
+            else:
+                # No person detected, zoom out to full frame
+                self.target_crop = [0.0, 0.0, 1.0, 1.0]
+
         return Gst.PadProbeReturn.OK
 
     def run(self):

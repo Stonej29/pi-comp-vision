@@ -60,6 +60,7 @@ Access the stream at `http://<pi-ip>:8080`
 | `--padding` | 0.3 | Padding around detected person |
 | `--no-boxes` | false | Hide detection boxes |
 | `--frame-mode` | false | Show virtual frame instead of zooming |
+| `--fps` | false | Show FPS counter |
 
 ## How It Works
 

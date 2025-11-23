@@ -25,7 +25,7 @@ class DetectionStream:
 
     def __init__(self, port=8080, video_source=None, smooth_factor=0.1,
                  zoom_out_delay=30, confidence_threshold=0.5, padding=0.3,
-                 show_boxes=True, zoom_mode=True):
+                 show_boxes=True, zoom_mode=True, show_fps=False):
         self.port = port
         self.video_source = video_source
         self.latest_frame = None
@@ -45,6 +45,10 @@ class DetectionStream:
         self.padding = padding
         self.show_boxes = show_boxes
         self.zoom_mode = zoom_mode
+        self.show_fps = show_fps
+        self.fps = 0
+        self.frame_count = 0
+        self.last_fps_time = time.time()
 
     def _setup_routes(self):
         @self.app.route('/')
@@ -68,6 +72,14 @@ class DetectionStream:
             buf = sample.get_buffer()
             ok, info = buf.map(Gst.MapFlags.READ)
             if ok:
+                # Calculate FPS
+                self.frame_count += 1
+                current_time = time.time()
+                if current_time - self.last_fps_time >= 1.0:
+                    self.fps = self.frame_count
+                    self.frame_count = 0
+                    self.last_fps_time = current_time
+
                 # Smooth interpolation toward target
                 for i in range(4):
                     self.current_crop[i] += (self.target_crop[i] - self.current_crop[i]) * self.smooth_factor
@@ -88,12 +100,18 @@ class DetectionStream:
                         cropped = frame[y:y+ch, x:x+cw]
                         if cropped.size > 0:
                             zoomed = cv2.resize(cropped, (w, h))
+                            if self.show_fps:
+                                cv2.putText(zoomed, f"{self.fps} FPS", (10, 30),
+                                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                             _, jpeg = cv2.imencode('.jpg', zoomed, [cv2.IMWRITE_JPEG_QUALITY, 80])
                             with self.frame_lock:
                                 self.latest_frame = jpeg.tobytes()
                     else:
                         # Draw virtual camera frame
                         cv2.rectangle(frame, (x, y), (x + cw, y + ch), (0, 255, 255), 3)
+                        if self.show_fps:
+                            cv2.putText(frame, f"{self.fps} FPS", (10, 30),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                         _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                         with self.frame_lock:
                             self.latest_frame = jpeg.tobytes()
@@ -239,6 +257,7 @@ if __name__ == "__main__":
     parser.add_argument("--padding", type=float, default=0.3, help="Padding around detected person")
     parser.add_argument("--no-boxes", action="store_true", help="Hide detection boxes")
     parser.add_argument("--frame-mode", action="store_true", help="Show virtual frame instead of zooming")
+    parser.add_argument("--fps", action="store_true", help="Show FPS counter")
     args = parser.parse_args()
 
     DetectionStream(
@@ -249,5 +268,6 @@ if __name__ == "__main__":
         confidence_threshold=args.confidence,
         padding=args.padding,
         show_boxes=not args.no_boxes,
-        zoom_mode=not args.frame_mode
+        zoom_mode=not args.frame_mode,
+        show_fps=args.fps
     ).run()

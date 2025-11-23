@@ -10,7 +10,7 @@ import time
 import os
 import gi
 gi.require_version('Gst', '1.0')
-from gi.repository import Gst, GLib
+from gi.repository import Gst, GLib, GObject
 import hailo
 from flask import Response
 import numpy as np
@@ -64,6 +64,7 @@ class DetectionStream:
     def _on_sample(self, sink):
         sample = sink.emit('pull-sample')
         if sample:
+            caps = sample.get_caps()
             buf = sample.get_buffer()
             ok, info = buf.map(Gst.MapFlags.READ)
             if ok:
@@ -78,9 +79,10 @@ class DetectionStream:
                 # Smooth interpolation toward target
                 self.tracking.interpolate()
 
-                # Decode JPEG and apply crop
-                frame = np.frombuffer(info.data, dtype=np.uint8)
-                frame = cv2.imdecode(frame, cv2.IMREAD_COLOR)
+                # Get frame dimensions from caps
+                height = caps.get_structure(0).get_value("height")
+                width = caps.get_structure(0).get_value("width")
+                frame = np.ndarray((height, width, 3), buffer=info.data, dtype=np.uint8)
 
                 if frame is not None:
                     h, w = frame.shape[:2]
@@ -98,7 +100,8 @@ class DetectionStream:
                             with self.frame_lock:
                                 self.latest_frame = jpeg.tobytes()
                     else:
-                        # Draw virtual camera frame
+                        # Draw virtual camera frame (copy since we're modifying)
+                        frame = frame.copy()
                         cv2.rectangle(frame, (x, y), (x + cw, y + ch), (0, 255, 255), 3)
                         if self.show_fps:
                             cv2.putText(frame, f"{self.fps} FPS", (10, 30),
@@ -156,23 +159,24 @@ class DetectionStream:
         bus.add_signal_watch()
         bus.connect("message", lambda bus, msg: self._on_message(bus, msg))
 
-        try:
-            self.loop.run()
-        except KeyboardInterrupt:
-            pass
-        finally:
+        # Handle Ctrl+C via GLib
+        def shutdown():
             print("\nShutting down...")
-            self.pipeline.set_state(Gst.State.NULL)
-            os._exit(0)
+            self.pipeline.send_event(Gst.Event.new_eos())
+
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 2, shutdown)  # 2 = SIGINT
+
+        self.loop.run()
 
     def _on_message(self, bus, msg):
         if msg.type == Gst.MessageType.EOS:
-            self.pipeline.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, 0)
+            print("End-of-Stream reached.")
+            self.pipeline.set_state(Gst.State.NULL)
+            self.loop.quit()
         elif msg.type == Gst.MessageType.ERROR:
             err, debug = msg.parse_error()
             print(f"Error: {err.message}")
             self.loop.quit()
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

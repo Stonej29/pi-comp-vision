@@ -7,6 +7,10 @@ gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 
 
+MODEL_PATH = "/usr/share/hailo-models/yolov8s_h8l.hef"
+POST_PROCESS_PATH = "/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so"
+
+
 def build_pipeline(video_source=None):
     """Build GStreamer pipeline for video capture and Hailo inference.
 
@@ -14,8 +18,19 @@ def build_pipeline(video_source=None):
         video_source: Path to video file, or None for camera
 
     Returns:
-        tuple: (pipeline, sync_setting) where sync_setting is 'true' or 'false'
+        Gst.Pipeline: Configured GStreamer pipeline
     """
+    # Check for required Hailo files
+    if not os.path.exists(MODEL_PATH):
+        print(f"Error: YOLO model not found at {MODEL_PATH}")
+        print("Please install hailo-models or specify correct path")
+        sys.exit(1)
+
+    if not os.path.exists(POST_PROCESS_PATH):
+        print(f"Error: Post-process library not found at {POST_PROCESS_PATH}")
+        print("Please install hailo-tappas or specify correct path")
+        sys.exit(1)
+
     if video_source:
         abs_path = os.path.abspath(video_source)
         if not os.path.exists(abs_path):
@@ -33,16 +48,16 @@ def build_pipeline(video_source=None):
         videoscale n-threads=2 add-borders=true !
         video/x-raw,format=RGB,width=640,height=640 !
         queue leaky=no max-size-buffers=3 !
-        hailonet hef-path=/usr/share/hailo-models/yolov8s_h8l.hef batch-size=1 force-writable=true !
+        hailonet hef-path={MODEL_PATH} batch-size=1 force-writable=true !
         queue leaky=no max-size-buffers=3 !
-        hailofilter so-path=/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so qos=false !
+        hailofilter so-path={POST_PROCESS_PATH} qos=false !
         identity name=cb !
         queue leaky=no max-size-buffers=3 !
         hailooverlay !
         videoscale n-threads=2 !
         video/x-raw,width=1280,height=720 !
         videoconvert n-threads=2 !
-        jpegenc quality=80 !
+        video/x-raw,format=BGR !
         appsink name=sink emit-signals=true sync={sync} drop=true max-buffers=1
     """
 

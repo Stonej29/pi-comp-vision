@@ -170,9 +170,8 @@ class DetectionStream:
 
     def _on_message(self, bus, msg):
         if msg.type == Gst.MessageType.EOS:
-            print("End-of-Stream reached.")
-            self.pipeline.set_state(Gst.State.NULL)
-            self.loop.quit()
+            # Loop video by seeking back to start
+            self.pipeline.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, 0)
         elif msg.type == Gst.MessageType.ERROR:
             err, debug = msg.parse_error()
             print(f"Error: {err.message}")

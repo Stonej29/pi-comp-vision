@@ -25,6 +25,8 @@ class DetectionStream:
         self.current_crop = [0.0, 0.0, 1.0, 1.0]
         self.target_crop = [0.0, 0.0, 1.0, 1.0]
         self.smooth_factor = 0.1
+        self.frames_without_person = 0
+        self.zoom_out_delay = 30
 
     def _setup_routes(self):
         @self.app.route('/')
@@ -92,6 +94,7 @@ class DetectionStream:
 
             # Update target crop based on best detection
             if best_person:
+                self.frames_without_person = 0
                 bbox = best_person.get_bbox()
                 # Add padding around the person (30%)
                 padding = 0.3
@@ -105,8 +108,10 @@ class DetectionStream:
                 size = min(size, 1.0)
                 self.target_crop = [x, y, size, size]
             else:
-                # No person detected, zoom out to full frame
-                self.target_crop = [0.0, 0.0, 1.0, 1.0]
+                # Delay before zooming out
+                self.frames_without_person += 1
+                if self.frames_without_person > self.zoom_out_delay:
+                    self.target_crop = [0.0, 0.0, 1.0, 1.0]
 
         return Gst.PadProbeReturn.OK
 

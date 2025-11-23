@@ -1,7 +1,14 @@
+"""
+Auto-tracking camera system with person detection using Hailo AI accelerator.
+
+Streams video with smooth zoom that follows detected persons.
+"""
+
 import argparse
 import threading
 import time
 import os
+import sys
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
@@ -12,8 +19,12 @@ import cv2
 
 Gst.init(None)
 
+
 class DetectionStream:
-    def __init__(self, port=8080, video_source=None):
+    """Real-time person detection and auto-tracking camera stream."""
+
+    def __init__(self, port=8080, video_source=None, smooth_factor=0.1,
+                 zoom_out_delay=30, confidence_threshold=0.5, padding=0.3):
         self.port = port
         self.video_source = video_source
         self.latest_frame = None
@@ -23,11 +34,14 @@ class DetectionStream:
         self.app = Flask(__name__)
         self._setup_routes()
 
+        # Zoom tracking state
         self.current_crop = [0.0, 0.0, 1.0, 1.0]
         self.target_crop = [0.0, 0.0, 1.0, 1.0]
-        self.smooth_factor = 0.1
+        self.smooth_factor = smooth_factor
         self.frames_without_person = 0
-        self.zoom_out_delay = 30
+        self.zoom_out_delay = zoom_out_delay
+        self.confidence_threshold = confidence_threshold
+        self.padding = padding
 
     def _setup_routes(self):
         @self.app.route('/')
@@ -86,7 +100,7 @@ class DetectionStream:
             best_confidence = 0.0
 
             for det in detections:
-                if det.get_label() != "person" or det.get_confidence() < 0.5:
+                if det.get_label() != "person" or det.get_confidence() < self.confidence_threshold:
                     roi.remove_object(det)
                 else:
                     if det.get_confidence() > best_confidence:
@@ -97,12 +111,10 @@ class DetectionStream:
             if best_person:
                 self.frames_without_person = 0
                 bbox = best_person.get_bbox()
-                # Add padding around the person (30%)
-                padding = 0.3
                 cx = bbox.xmin() + bbox.width() / 2
                 cy = bbox.ymin() + bbox.height() / 2
                 # Make crop square using the larger dimension
-                size = max(bbox.width(), bbox.height()) * (1 + 2 * padding)
+                size = max(bbox.width(), bbox.height()) * (1 + 2 * self.padding)
                 # Clamp to frame bounds
                 x = max(0.0, min(cx - size / 2, 1.0 - size))
                 y = max(0.0, min(cy - size / 2, 1.0 - size))
@@ -117,18 +129,22 @@ class DetectionStream:
         return Gst.PadProbeReturn.OK
 
     def run(self):
+        # Validate video source if provided
         if self.video_source:
             abs_path = os.path.abspath(self.video_source)
+            if not os.path.exists(abs_path):
+                print(f"Error: Video file not found: {abs_path}")
+                sys.exit(1)
             source = f'filesrc location="{abs_path}" ! qtdemux ! h264parse ! avdec_h264 ! videoconvert !'
+            sync = 'true'
         else:
             source = 'libcamerasrc ! video/x-raw,format=RGB,width=640,height=480 !'
+            sync = 'false'
 
         pipeline_str = f"""
             {source}
             queue leaky=no max-size-buffers=3 !
-            videoflip video-direction=0 !
-            videobox autocrop=true !
-            videoscale n-threads=2 !
+            videoscale n-threads=2 add-borders=true !
             video/x-raw,format=RGB,width=640,height=640 !
             queue leaky=no max-size-buffers=3 !
             hailonet hef-path=/usr/share/hailo-models/yolov8s_h8l.hef batch-size=1 force-writable=true !
@@ -137,12 +153,18 @@ class DetectionStream:
             identity name=cb !
             queue leaky=no max-size-buffers=3 !
             hailooverlay !
+            videoscale n-threads=2 !
+            video/x-raw,width=1280,height=720 !
             videoconvert n-threads=2 !
             jpegenc quality=80 !
-            appsink name=sink emit-signals=true sync=false drop=true max-buffers=1
+            appsink name=sink emit-signals=true sync={sync} drop=true max-buffers=1
         """
 
-        self.pipeline = Gst.parse_launch(pipeline_str)
+        try:
+            self.pipeline = Gst.parse_launch(pipeline_str)
+        except GLib.Error as e:
+            print(f"Error: Failed to create pipeline: {e}")
+            sys.exit(1)
 
         # Detection callback
         cb = self.pipeline.get_by_name("cb")
@@ -155,7 +177,12 @@ class DetectionStream:
         self.pipeline.set_state(Gst.State.PLAYING)
 
         # Start Flask
-        threading.Thread(target=lambda: self.app.run(host='0.0.0.0', port=self.port, threaded=True, use_reloader=False), daemon=True).start()
+        threading.Thread(
+            target=lambda: self.app.run(host='0.0.0.0', port=self.port, threaded=True, use_reloader=False),
+            daemon=True
+        ).start()
+
+        print(f"Stream available at http://0.0.0.0:{self.port}")
 
         self.loop = GLib.MainLoop()
         bus = self.pipeline.get_bus()
@@ -167,20 +194,37 @@ class DetectionStream:
         except KeyboardInterrupt:
             pass
         finally:
+            print("\nShutting down...")
             self.pipeline.set_state(Gst.State.NULL)
+            os._exit(0)
 
     def _on_message(self, bus, msg):
         if msg.type == Gst.MessageType.EOS:
             self.pipeline.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, 0)
         elif msg.type == Gst.MessageType.ERROR:
-            err, _ = msg.parse_error()
-            print(f"Error: {err}")
+            err, debug = msg.parse_error()
+            print(f"Error: {err.message}")
             self.loop.quit()
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Hailo detection web stream")
+    parser = argparse.ArgumentParser(
+        description="Auto-tracking camera with person detection",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
     parser.add_argument("-i", "--input", help="Video file path (default: camera)")
     parser.add_argument("-p", "--port", type=int, default=8080, help="Web server port")
+    parser.add_argument("-s", "--smooth", type=float, default=0.1, help="Smooth factor (lower = smoother)")
+    parser.add_argument("-d", "--delay", type=int, default=30, help="Frames to wait before zooming out")
+    parser.add_argument("-c", "--confidence", type=float, default=0.5, help="Minimum detection confidence")
+    parser.add_argument("--padding", type=float, default=0.3, help="Padding around detected person")
     args = parser.parse_args()
 
-    DetectionStream(port=args.port, video_source=args.input).run()
+    DetectionStream(
+        port=args.port,
+        video_source=args.input,
+        smooth_factor=args.smooth,
+        zoom_out_delay=args.delay,
+        confidence_threshold=args.confidence,
+        padding=args.padding
+    ).run()

@@ -1,13 +1,16 @@
-# Pi Computer Vision - Auto-Tracking Camera
+# Pi Auto-Tracking Camera
 
 Real-time person detection and auto-tracking camera system for Raspberry Pi 5 with Hailo AI accelerator.
 
+![Demo](demo.gif)
+
 ## Features
 
-- **Person Detection**: YOLOv8s model running on Hailo-8L NPU
+- **Person Detection**: YOLOv8s model running on Hailo-8L NPU at ~30 FPS
 - **Auto-Tracking Zoom**: Smooth camera zoom that follows detected persons
 - **Web Streaming**: Live MJPEG stream accessible from any browser
 - **Zoom Hysteresis**: Delayed zoom-out prevents jittery tracking
+- **Configurable**: All tracking parameters adjustable via command line
 
 ## Requirements
 
@@ -31,22 +34,22 @@ python detection_web.py
 # Run with video file
 python detection_web.py -i video.mp4
 
-# Custom port
-python detection_web.py -p 8000
+# Custom settings
+python detection_web.py -p 8000 -s 0.05 -c 0.6
 ```
 
 Access the stream at `http://<pi-ip>:8080`
 
-## Configuration
+## Command Line Options
 
-Edit these values in `detection_web.py`:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `smooth_factor` | 0.1 | Zoom smoothness (lower = smoother) |
-| `zoom_out_delay` | 30 | Frames to wait before zooming out |
-| `padding` | 0.3 | Extra space around detected person |
-| Confidence threshold | 0.5 | Minimum detection confidence |
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-i, --input` | camera | Video file path |
+| `-p, --port` | 8080 | Web server port |
+| `-s, --smooth` | 0.1 | Smooth factor (lower = smoother) |
+| `-d, --delay` | 30 | Frames to wait before zooming out |
+| `-c, --confidence` | 0.5 | Minimum detection confidence |
+| `--padding` | 0.3 | Padding around detected person |
 
 ## How It Works
 

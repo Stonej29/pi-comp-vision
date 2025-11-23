@@ -8,8 +8,10 @@ Real-time person detection and auto-tracking camera system for Raspberry Pi 5 wi
 
 - **Person Detection**: YOLOv8s model running on Hailo-8L NPU at ~30 FPS
 - **Auto-Tracking Zoom**: Smooth camera zoom that follows detected persons
+- **Multi-Person Tracking**: Automatically frames all detected people
 - **Web Streaming**: Live MJPEG stream accessible from any browser
 - **Zoom Hysteresis**: Delayed zoom-out prevents jittery tracking
+- **Virtual Frame Mode**: Preview tracking region without zooming
 - **Configurable**: All tracking parameters adjustable via command line
 
 ## Requirements
@@ -34,6 +36,12 @@ python detection_web.py
 # Run with video file
 python detection_web.py -i video.mp4
 
+# Virtual frame mode (shows tracking region without zooming)
+python detection_web.py --frame-mode
+
+# Hide detection boxes
+python detection_web.py --no-boxes
+
 # Custom settings
 python detection_web.py -p 8000 -s 0.05 -c 0.6
 ```
@@ -50,12 +58,15 @@ Access the stream at `http://<pi-ip>:8080`
 | `-d, --delay` | 30 | Frames to wait before zooming out |
 | `-c, --confidence` | 0.5 | Minimum detection confidence |
 | `--padding` | 0.3 | Padding around detected person |
+| `--no-boxes` | false | Hide detection boxes |
+| `--frame-mode` | false | Show virtual frame instead of zooming |
 
 ## How It Works
 
 1. Camera captures 640x480 frames
 2. Hailo NPU runs YOLOv8s inference
-3. Best person detection (highest confidence) is selected
-4. Target crop region is calculated with padding
-5. Current crop smoothly interpolates toward target
-6. Cropped/zoomed frame is streamed via Flask
+3. All persons above confidence threshold are detected
+4. Bounding box containing all persons is calculated
+5. Target crop region is calculated with padding
+6. Current crop smoothly interpolates toward target
+7. Cropped/zoomed frame is streamed via Flask

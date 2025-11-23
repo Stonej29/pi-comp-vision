@@ -24,7 +24,8 @@ class DetectionStream:
     """Real-time person detection and auto-tracking camera stream."""
 
     def __init__(self, port=8080, video_source=None, smooth_factor=0.1,
-                 zoom_out_delay=30, confidence_threshold=0.5, padding=0.3):
+                 zoom_out_delay=30, confidence_threshold=0.5, padding=0.3,
+                 show_boxes=True, zoom_mode=True):
         self.port = port
         self.video_source = video_source
         self.latest_frame = None
@@ -42,6 +43,8 @@ class DetectionStream:
         self.zoom_out_delay = zoom_out_delay
         self.confidence_threshold = confidence_threshold
         self.padding = padding
+        self.show_boxes = show_boxes
+        self.zoom_mode = zoom_mode
 
     def _setup_routes(self):
         @self.app.route('/')
@@ -80,11 +83,18 @@ class DetectionStream:
                     cw = int(self.current_crop[2] * w)
                     ch = int(self.current_crop[3] * h)
 
-                    # Crop and resize back to original size
-                    cropped = frame[y:y+ch, x:x+cw]
-                    if cropped.size > 0:
-                        zoomed = cv2.resize(cropped, (w, h))
-                        _, jpeg = cv2.imencode('.jpg', zoomed, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    if self.zoom_mode:
+                        # Crop and resize back to original size
+                        cropped = frame[y:y+ch, x:x+cw]
+                        if cropped.size > 0:
+                            zoomed = cv2.resize(cropped, (w, h))
+                            _, jpeg = cv2.imencode('.jpg', zoomed, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                            with self.frame_lock:
+                                self.latest_frame = jpeg.tobytes()
+                    else:
+                        # Draw virtual camera frame
+                        cv2.rectangle(frame, (x, y), (x + cw, y + ch), (0, 255, 255), 3)
+                        _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                         with self.frame_lock:
                             self.latest_frame = jpeg.tobytes()
 
@@ -96,25 +106,34 @@ class DetectionStream:
         if buf:
             roi = hailo.get_roi_from_buffer(buf)
             detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
-            best_person = None
-            best_confidence = 0.0
+            persons = []
 
             for det in detections:
                 if det.get_label() != "person" or det.get_confidence() < self.confidence_threshold:
                     roi.remove_object(det)
                 else:
-                    if det.get_confidence() > best_confidence:
-                        best_confidence = det.get_confidence()
-                        best_person = det
+                    persons.append(det)
+                    if not self.show_boxes:
+                        roi.remove_object(det)
 
-            # Update target crop based on best detection
-            if best_person:
+            # Update target crop based on all detected persons
+            if persons:
                 self.frames_without_person = 0
-                bbox = best_person.get_bbox()
-                cx = bbox.xmin() + bbox.width() / 2
-                cy = bbox.ymin() + bbox.height() / 2
+
+                # Calculate bounding box that contains all persons
+                min_x = min(det.get_bbox().xmin() for det in persons)
+                min_y = min(det.get_bbox().ymin() for det in persons)
+                max_x = max(det.get_bbox().xmin() + det.get_bbox().width() for det in persons)
+                max_y = max(det.get_bbox().ymin() + det.get_bbox().height() for det in persons)
+
+                # Calculate center and size
+                cx = (min_x + max_x) / 2
+                cy = (min_y + max_y) / 2
+                width = max_x - min_x
+                height = max_y - min_y
+
                 # Make crop square using the larger dimension
-                size = max(bbox.width(), bbox.height()) * (1 + 2 * self.padding)
+                size = max(width, height) * (1 + 2 * self.padding)
                 # Clamp to frame bounds
                 x = max(0.0, min(cx - size / 2, 1.0 - size))
                 y = max(0.0, min(cy - size / 2, 1.0 - size))
@@ -218,6 +237,8 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--delay", type=int, default=30, help="Frames to wait before zooming out")
     parser.add_argument("-c", "--confidence", type=float, default=0.5, help="Minimum detection confidence")
     parser.add_argument("--padding", type=float, default=0.3, help="Padding around detected person")
+    parser.add_argument("--no-boxes", action="store_true", help="Hide detection boxes")
+    parser.add_argument("--frame-mode", action="store_true", help="Show virtual frame instead of zooming")
     args = parser.parse_args()
 
     DetectionStream(
@@ -226,5 +247,7 @@ if __name__ == "__main__":
         smooth_factor=args.smooth,
         zoom_out_delay=args.delay,
         confidence_threshold=args.confidence,
-        padding=args.padding
+        padding=args.padding,
+        show_boxes=not args.no_boxes,
+        zoom_mode=not args.frame_mode
     ).run()
